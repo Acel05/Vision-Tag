@@ -6,6 +6,7 @@ from PIL import Image, ImageTk, ImageEnhance
 from collections import defaultdict
 import json
 import copy
+import math
 
 # --- IMPORT MODULAR UTILITIES ---
 from utils.geometry import get_rotated_points, get_local_coords, is_point_in_box
@@ -38,17 +39,20 @@ class VisionTag_Enterprise:
         self.toast_msg = ""
         self.toast_color = ""
         self.toast_timer = None
+        self.toast_step = 0
         
         self.source_dir = filedialog.askdirectory(title="Select Dataset Directory")
         if not self.source_dir:
             self.root.destroy()
             return
             
-        self.image_list = [f for f in os.listdir(self.source_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+        self.image_list = [f for f in os.listdir(self.source_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))]
         if not self.image_list:
             messagebox.showerror("Error", "No images found in the selected directory.")
             self.root.destroy()
             return
+
+        self.raw_basenames = {os.path.splitext(f)[0] for f in self.image_list}
 
         self.load_external_config()
         self.scan_existing_labels()
@@ -79,6 +83,223 @@ class VisionTag_Enterprise:
         self.setup_shortcuts()
         self.load_image()
 
+    # =======================================================
+    # CORE FIX: SUPER PRECISION MATCHING & SCANNING
+    # =======================================================
+
+    def _is_matching_file(self, filename, base_name, extension=".txt"):
+        target = f"{base_name}{extension}"
+        if filename == target:
+            return True
+            
+        if filename.endswith(target):
+            full_label_basename = filename[:-len(extension)]
+            if full_label_basename in self.raw_basenames and full_label_basename != base_name:
+                return False
+                
+            prefix_len = len(filename) - len(target)
+            char_before = filename[prefix_len - 1]
+            
+            if char_before in ['-', '_']:
+                return True
+                
+        return False
+
+    def scan_existing_labels(self):
+        self.history_tags.clear()
+        img_map = {os.path.splitext(f)[0]: idx for idx, f in enumerate(self.image_list)}
+        
+        for cls in self.master_classes:
+            lbl_dir = os.path.join(self.source_dir, cls, 'labels')
+            if os.path.exists(lbl_dir):
+                for f in os.listdir(lbl_dir):
+                    if f.endswith('.txt'):
+                        base = os.path.splitext(f)[0]
+                        match_idx = None
+                        
+                        if base in img_map: 
+                            match_idx = img_map[base]
+                        else:
+                            for raw_base, idx in img_map.items():
+                                if self._is_matching_file(f, raw_base, ".txt"):
+                                    match_idx = idx
+                                    break
+                                    
+                        if match_idx is not None:
+                            if match_idx not in self.history_tags: 
+                                self.history_tags[match_idx] = set()
+                            self.history_tags[match_idx].add(cls)
+
+    def load_image(self):
+        if not self.image_list: 
+            return
+            
+        if 0 <= self.current_index < len(self.image_list):
+            filename = self.image_list[self.current_index]
+            filepath = os.path.join(self.source_dir, filename)
+            
+            self.canvas.delete("box", "img", "hud")
+            self.current_boxes = [] 
+            self.undo_stack.clear()
+            self.redo_stack.clear()
+            self.selected_box_idx = -1
+            self.root.update_idletasks() 
+            
+            try:
+                self.original_img = Image.open(filepath)
+                self.brightness = 1.0
+                self.contrast = 1.0
+                
+                img_w, img_h = self.original_img.size
+                base_name = os.path.splitext(filename)[0]
+
+                for cls in self.master_classes:
+                    lbl_dir = os.path.join(self.source_dir, cls, 'labels')
+                    if os.path.exists(lbl_dir):
+                        for lbl_file in os.listdir(lbl_dir):
+                            if self._is_matching_file(lbl_file, base_name, ".txt"):
+                                label_path = os.path.join(lbl_dir, lbl_file)
+                                try:
+                                    with open(label_path, 'r') as f:
+                                        for line in f:
+                                            parts = line.strip().split()
+                                            if len(parts) >= 9:
+                                                nx1, ny1, nx2, ny2, nx3, ny3, nx4, ny4 = map(float, parts[1:9])
+                                                ox1, oy1 = nx1 * img_w, ny1 * img_h
+                                                ox2, oy2 = nx2 * img_w, ny2 * img_h
+                                                ox3, oy3 = nx3 * img_w, ny3 * img_h
+                                                ox4, oy4 = nx4 * img_w, ny4 * img_h
+                                                
+                                                ocx = (ox1 + ox2 + ox3 + ox4) / 4
+                                                ocy = (oy1 + oy2 + oy3 + oy4) / 4
+                                                ow = math.hypot(ox2 - ox1, oy2 - oy1)
+                                                oh = math.hypot(ox3 - ox2, oy3 - oy2)
+                                                angle = math.degrees(math.atan2(oy2 - oy1, ox2 - ox1))
+                                                
+                                                self.current_boxes.append([cls, ocx, ocy, ow, oh, angle])
+                                except Exception as e:
+                                    print(f"Error reading {lbl_file}: {e}")
+            except Exception as e:
+                messagebox.showerror("Error", f"Gagal memuat gambar: {e}")
+                return
+
+            cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
+            if cw <= 1: 
+                cw, ch = self.root.winfo_screenwidth() - 400, self.root.winfo_screenheight() - 200
+                
+            ratio = min(cw/img_w, ch/img_h)
+            self.zoom_level, self.img_x, self.img_y = ratio * 0.95, cw // 2, ch // 2
+            self.available_classes = list(self.master_classes)
+            self.jump_var.set(str(self.current_index + 1))
+            
+            display_name = filename if len(filename) <= 40 else filename[:20] + "..." + filename[-15:]
+            self.filename_label.config(text=f"FILE: {display_name}")
+            self.status_text.config(text=f"{self.current_index+1}/{len(self.image_list)}")
+            
+            if self.current_index in self.history_tags:
+                self.save_indicator.config(text="✅", fg="#2ea44f")
+                self.history_label.config(text=f"Labeled in: {list(self.history_tags[self.current_index])}")
+            else:
+                self.save_indicator.config(text="⭕", fg="#555")
+                self.history_label.config(text="No labels yet.")
+            
+            self.show_image()
+            self.render_tags()
+            self.canvas.focus_set()
+
+    def _remove_files_for_class(self, cls_name, filename, base_name):
+        lbl_dir = os.path.join(self.source_dir, cls_name, 'labels')
+        img_dir = os.path.join(self.source_dir, cls_name, 'images')
+        
+        if os.path.exists(lbl_dir):
+            for f in os.listdir(lbl_dir):
+                if self._is_matching_file(f, base_name, ".txt"):
+                    os.remove(os.path.join(lbl_dir, f))
+                    img_f = os.path.splitext(f)[0] + os.path.splitext(filename)[1]
+                    if os.path.exists(os.path.join(img_dir, img_f)):
+                        os.remove(os.path.join(img_dir, img_f))
+
+    def final_save(self):
+        filename = self.image_list[self.current_index]
+        base_name = os.path.splitext(filename)[0]
+        src_filepath = os.path.join(self.source_dir, filename)
+        img_w, img_h = self.original_img.size
+        
+        old_classes = self.history_tags.get(self.current_index, set())
+
+        if not self.current_boxes:
+            if old_classes:
+                if messagebox.askyesno("Remove All Labels", "Hapus semua label untuk gambar ini?"):
+                    for cls in old_classes:
+                        self._remove_files_for_class(cls, filename, base_name)
+                    if self.current_index in self.history_tags:
+                        del self.history_tags[self.current_index]
+                    self.next_image()
+                return
+            else:
+                self.next_image()
+                return
+
+        boxes_by_class = defaultdict(list)
+        for box in self.current_boxes:
+            boxes_by_class[box[0]].append(box)
+
+        new_classes = set(boxes_by_class.keys())
+
+        for cls_to_remove in old_classes - new_classes:
+            self._remove_files_for_class(cls_to_remove, filename, base_name)
+
+        for cls_name, boxes in boxes_by_class.items():
+            class_dir = os.path.join(self.source_dir, cls_name)
+            img_dir = os.path.join(class_dir, "images")
+            lbl_dir = os.path.join(class_dir, "labels")
+            
+            os.makedirs(img_dir, exist_ok=True)
+            os.makedirs(lbl_dir, exist_ok=True)
+            
+            target_basename = base_name
+            if os.path.exists(lbl_dir):
+                for existing in os.listdir(lbl_dir):
+                    if self._is_matching_file(existing, base_name, ".txt"):
+                        target_basename = os.path.splitext(existing)[0]
+                        break
+            
+            self._remove_files_for_class(cls_name, filename, base_name)
+            
+            target_filename = target_basename + os.path.splitext(filename)[1]
+            dest_img_path = os.path.join(img_dir, target_filename)
+            shutil.copy2(src_filepath, dest_img_path)
+
+            with open(os.path.join(class_dir, 'classes.txt'), 'w') as f:
+                f.write(f"{cls_name}\n")
+
+            notes_data = {"categories": [{"id": 0, "name": cls_name}], "info": {"year": 2026, "version": "1.0", "contributor": "Label Studio"}}
+            with open(os.path.join(class_dir, 'notes.json'), 'w') as f:
+                json.dump(notes_data, f, indent=2)
+                
+            dest_txt_path = os.path.join(lbl_dir, f"{target_basename}.txt")
+            with open(dest_txt_path, 'w') as f:
+                for box in boxes:
+                    cls, cx, cy, w, h, angle = box
+                    cls_id = 0 
+                    pts = get_rotated_points(cx, cy, w, h, angle)
+                    norm_pts = []
+                    for px, py in pts:
+                        nx, ny = px / img_w, py / img_h
+                        norm_pts.extend([max(0.0, min(1.0, nx)), max(0.0, min(1.0, ny))])
+                    
+                    line = f"{cls_id} " + " ".join(f"{p:.6f}" for p in norm_pts)
+                    f.write(line + "\n")
+                
+        self.history_tags[self.current_index] = new_classes
+        self.set_status_message(f"SAVED: {target_basename}", "#00ff00")
+        self.next_image()
+
+
+    # ==============================================================
+    # AI, RENAME, & AUGMENTATION LOGIC
+    # ==============================================================
+
     def run_auto_detect(self):
         if not HAS_YOLO:
             messagebox.showerror("Dependency Missing", "Library AI tidak ditemukan.\nInstall via terminal:\npip install ultralytics")
@@ -105,7 +326,6 @@ class VisionTag_Enterprise:
             self.push_state() 
             
             boxes_added = 0
-            import math
             for r in results:
                 if r.obb is not None:
                     for i in range(len(r.obb)):
@@ -155,7 +375,7 @@ class VisionTag_Enterprise:
                 return
             if old_name == new_name: return
             
-            if messagebox.askyesno("Confirm", f"Apakah Anda yakin ingin mengubah seluruh dataset '{old_name}' menjadi '{new_name}'?"):
+            if messagebox.askyesno("Confirm", f"Apakah Anda yakin ingin mengubah '{old_name}' menjadi '{new_name}'?"):
                 self.execute_bulk_rename(old_name, new_name, dialog)
 
         tk.Button(dialog, text="APPLY RENAME", bg="#ff8c00", fg="white", font=("Segoe UI", 10, "bold"), relief="flat", command=execute).pack(fill="x", padx=30, pady=5)
@@ -184,7 +404,7 @@ class VisionTag_Enterprise:
                         data['categories'][0]['name'] = new_name
                     with open(notes_json, 'w') as f:
                         json.dump(data, f, indent=2)
-                except Exception as e:
+                except Exception:
                     pass
                     
         if old_name in self.master_classes:
@@ -224,8 +444,7 @@ class VisionTag_Enterprise:
         dialog.grab_set()
 
         tk.Label(dialog, text="Duplikasi Data & Label (Rotate)", bg="#1e1e1e", fg="#00f2ff", font=("Segoe UI", 12, "bold")).pack(pady=(15, 5))
-        tk.Label(dialog, text="Pilih satu atau lebih rotasi:", bg="#1e1e1e", fg="#aaa", font=("Segoe UI", 9)).pack()
-
+        
         self.rot_90_var = tk.BooleanVar(value=False)
         self.rot_180_var = tk.BooleanVar(value=False)
         self.rot_270_var = tk.BooleanVar(value=False)
@@ -271,7 +490,6 @@ class VisionTag_Enterprise:
         new_boxes = []
         for box in self.current_boxes:
             cls_name, cx, cy, w, h, box_angle = box
-            
             if angle == 90:
                 new_cx, new_cy = old_h - cy, cx
             elif angle == 180:
@@ -301,7 +519,7 @@ class VisionTag_Enterprise:
             os.makedirs(lbl_dir, exist_ok=True)
             
             dest_img_path = os.path.join(img_dir, new_filename)
-            shutil.copy(new_src_path, dest_img_path)
+            shutil.copy2(new_src_path, dest_img_path)
 
             with open(os.path.join(class_dir, 'classes.txt'), 'w') as f:
                 f.write(f"{cls_name}\n")
@@ -445,22 +663,6 @@ class VisionTag_Enterprise:
             stats_text = f"{counts[cls_name]} imgs  ({percent:.1f}%)"
             tk.Label(row, text=stats_text, fg="#fff", bg=row_bg, font=("Consolas", 10)).pack(side="left", padx=10)
 
-    def scan_existing_labels(self):
-        self.history_tags.clear()
-        image_basename_map = {os.path.splitext(filename)[0]: idx for idx, filename in enumerate(self.image_list)}
-        
-        for cls in self.master_classes:
-            labels_dir = os.path.join(self.source_dir, cls, 'labels')
-            if os.path.exists(labels_dir):
-                for filename in os.listdir(labels_dir):
-                    if filename.endswith('.txt'):
-                        base_name = os.path.splitext(filename)[0]
-                        if base_name in image_basename_map:
-                            idx = image_basename_map[base_name]
-                            if idx not in self.history_tags:
-                                self.history_tags[idx] = set()
-                            self.history_tags[idx].add(cls)
-
     def auto_skip_to_untagged(self):
         for i in range(len(self.image_list)):
             if i not in self.history_tags:
@@ -468,6 +670,10 @@ class VisionTag_Enterprise:
                 break
         else:
             self.current_index = len(self.image_list) - 1 if self.image_list else 0
+
+    # ==============================================================
+    # UI SETUP & SHORTCUTS
+    # ==============================================================
 
     def setup_shortcuts(self):
         def is_not_typing(e):
@@ -627,12 +833,10 @@ class VisionTag_Enterprise:
 
     def set_status_message(self, text, color="#00ff00", duration=2000):
         self.status_text.config(text=f"{self.current_index+1}/{len(self.image_list)}", fg="#888")
-        
         self.toast_msg = text
         self.toast_color = color
         self.toast_step = 0  
         self.show_image() 
-        
         if hasattr(self, 'toast_timer') and self.toast_timer:
             self.root.after_cancel(self.toast_timer)
         self.toast_timer = self.root.after(duration, self.fade_out_toast)
@@ -664,7 +868,6 @@ class VisionTag_Enterprise:
             ox, oy = self.canvas_to_img(self.current_mouse_x, self.current_mouse_y)
             new_box[1] = ox
             new_box[2] = oy
-            
             self.current_boxes.append(new_box)
             self.selected_box_idx = len(self.current_boxes) - 1 
             self.show_image()
@@ -725,13 +928,11 @@ class VisionTag_Enterprise:
     def set_active_class(self, tag):
         self.queue_list.delete(0, tk.END)
         self.queue_list.insert(tk.END, tag)
-        
         if self.selected_box_idx != -1 and self.selected_box_idx < len(self.current_boxes):
             self.push_state()
             self.current_boxes[self.selected_box_idx][0] = tag
             self.show_image()
             self.set_status_message(f"Label updated to {tag}", "#00ff00")
-            
         self.canvas.focus_set() 
 
     def get_active_class(self):
@@ -745,7 +946,6 @@ class VisionTag_Enterprise:
             self._save_external_config()
             self.search_var.set("")
             self.render_tags()
-            
         self.canvas.focus_set()
         return "break"
 
@@ -803,11 +1003,9 @@ class VisionTag_Enterprise:
             for i in reversed(range(len(self.current_boxes))):
                 if is_point_in_box(ox, oy, self.current_boxes[i]):
                     self.push_state() 
-                    
                     rotated_box = self.current_boxes.pop(i)
                     self.current_boxes.append(rotated_box)
                     self.selected_box_idx = len(self.current_boxes) - 1
-                    
                     step = 5 if delta > 0 else -5 
                     self.current_boxes[-1][5] = (self.current_boxes[-1][5] + step) % 360
                     self.show_image()
@@ -846,7 +1044,6 @@ class VisionTag_Enterprise:
             box = self.current_boxes[i]
             if is_point_in_box(ox, oy, box):
                 self.push_state()
-                
                 clicked_box = self.current_boxes.pop(i)
                 self.current_boxes.append(clicked_box)
                 self.selected_box_idx = len(self.current_boxes) - 1  
@@ -875,7 +1072,6 @@ class VisionTag_Enterprise:
                     self.resize_axis = "height"
                 else:
                     self.action_mode = "move"
-                
                 self.show_image() 
                 return
 
@@ -898,7 +1094,6 @@ class VisionTag_Enterprise:
             dx = ox - self.start_ox
             dy = oy - self.start_oy
             orig_cx, orig_cy, _, _, _ = self.interact_start_state
-            
             self.current_boxes[self.selected_box_idx][1] = orig_cx + dx
             self.current_boxes[self.selected_box_idx][2] = orig_cy + dy
             self.show_image()
@@ -906,7 +1101,6 @@ class VisionTag_Enterprise:
         elif self.action_mode == "resize":
             orig_cx, orig_cy, orig_w, orig_h, orig_angle = self.interact_start_state
             lx, ly = get_local_coords(ox, oy, orig_cx, orig_cy, orig_angle)
-            
             if self.resize_axis in ("both", "width"):
                 self.current_boxes[self.selected_box_idx][3] = max(10, abs(lx) * 2)
             if self.resize_axis in ("both", "height"):
@@ -933,9 +1127,9 @@ class VisionTag_Enterprise:
                 self.current_boxes.append([active_class, ocx, ocy, ow, oh, 0.0])
                 self.selected_box_idx = len(self.current_boxes) - 1
             self.show_image()
-            
         self.action_mode = "none"
 
+    # --- MISSING FUNCTIONS ADDED BACK ---
     def clear_all_boxes(self):
         self.push_state()
         self.current_boxes.clear()
@@ -962,144 +1156,8 @@ class VisionTag_Enterprise:
             
             text_x, text_y = self.img_to_canvas(pts[0][0], pts[0][1])
             font_size = max(7, int(11 * self.zoom_level))
-            
             self.canvas.create_text(text_x + 1, text_y - 2 + 1, text=cls_name, fill="#000000", anchor="sw", font=("Segoe UI", font_size, "bold"), tags="box")
             self.canvas.create_text(text_x, text_y - 2, text=cls_name, fill=outline_color, anchor="sw", font=("Segoe UI", font_size, "bold"), tags="box")
-
-    def load_image(self):
-        if not self.image_list: return
-        if 0 <= self.current_index < len(self.image_list):
-            filename = self.image_list[self.current_index]
-            filepath = os.path.join(self.source_dir, filename)
-            
-            self.original_img = Image.open(filepath)
-            
-            self.brightness = 1.0
-            self.contrast = 1.0
-
-            self.root.update()
-            
-            self.current_boxes = [] 
-            self.undo_stack.clear()
-            self.redo_stack.clear()
-            self.selected_box_idx = -1
-            
-            img_w, img_h = self.original_img.size
-
-            base_name = os.path.splitext(filename)[0]
-            for cls in self.master_classes:
-                label_path = os.path.join(self.source_dir, cls, 'labels', f"{base_name}.txt")
-                if os.path.exists(label_path):
-                    with open(label_path, 'r') as f:
-                        for line in f:
-                            parts = line.strip().split()
-                            if len(parts) >= 9:
-                                nx1, ny1, nx2, ny2, nx3, ny3, nx4, ny4 = map(float, parts[1:9])
-                                ox1, oy1 = nx1 * img_w, ny1 * img_h
-                                ox2, oy2 = nx2 * img_w, ny2 * img_h
-                                ox3, oy3 = nx3 * img_w, ny3 * img_h
-                                ox4, oy4 = nx4 * img_w, ny4 * img_h
-                                
-                                ocx = (ox1 + ox2 + ox3 + ox4) / 4
-                                ocy = (oy1 + oy2 + oy3 + oy4) / 4
-                                ow = math.hypot(ox2 - ox1, oy2 - oy1)
-                                oh = math.hypot(ox3 - ox2, oy3 - oy2)
-                                angle = math.degrees(math.atan2(oy2 - oy1, ox2 - ox1))
-                                
-                                self.current_boxes.append([cls, ocx, ocy, ow, oh, angle])
-
-            cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
-            ratio = min(cw/img_w, ch/img_h)
-            self.zoom_level, self.img_x, self.img_y = ratio * 0.95, cw // 2, ch // 2
-            
-            self.current_mouse_x = cw // 2
-            self.current_mouse_y = ch // 2
-            
-            self.available_classes = list(self.master_classes)
-            self.jump_var.set(str(self.current_index + 1))
-            
-            display_name = filename
-            if len(display_name) > 40:
-                display_name = display_name[:20] + "..." + display_name[-15:]
-                
-            self.filename_label.config(text=f"FILE: {display_name}")
-            self.status_text.config(text=f"{self.current_index+1}/{len(self.image_list)}")
-            
-            if self.current_index in self.history_tags:
-                classes_str = ", ".join(self.history_tags[self.current_index])
-                self.save_indicator.config(text="✅", fg="#2ea44f")
-                self.history_label.config(text=f"Labeled in: [{classes_str}]")
-            else:
-                self.save_indicator.config(text="⭕", fg="#555")
-                self.history_label.config(text="No labels yet.")
-            
-            self.show_image()
-            self.render_tags()
-            self.canvas.focus_set()
-
-    def show_image(self):
-        if not self.original_img: return
-        w, h = self.original_img.size
-        resized = self.original_img.resize((max(1, int(w * self.zoom_level)), max(1, int(h * self.zoom_level))), Image.Resampling.LANCZOS)
-        
-        if self.brightness != 1.0:
-            resized = ImageEnhance.Brightness(resized).enhance(self.brightness)
-        if self.contrast != 1.0:
-            resized = ImageEnhance.Contrast(resized).enhance(self.contrast)
-
-        self.tk_img = ImageTk.PhotoImage(resized)
-        
-        self.canvas.delete("img", "box", "hud")
-        self.canvas.create_image(self.img_x, self.img_y, image=self.tk_img, anchor="center", tags="img")
-        
-        self.draw_all_boxes()
-        
-        # --- DESAIN HUD MODERN & RAPI ---
-        pad_x, pad_y = 12, 10
-        hud_font = ("Consolas", 9, "bold") 
-        
-        # 1. HUD KIRI ATAS
-        hud_text = (
-            f"ZOOM       : {int(self.zoom_level*100)}%\n"
-            f"BRIGHTNESS : {self.brightness:.1f}x\n"
-            f"CONTRAST   : {self.contrast:.1f}x"
-        )
-        
-        t_hud = self.canvas.create_text(25, 20, text=hud_text, fill="#ffffff", anchor="nw", font=hud_font, tags="hud")
-        bbox_hud = self.canvas.bbox(t_hud)
-        if bbox_hud:
-            bg_hud = self.canvas.create_rectangle(bbox_hud[0]-pad_x, bbox_hud[1]-pad_y, bbox_hud[2]+pad_x, bbox_hud[3]+pad_y, fill="#1c1c1c", outline="#333333", width=1, tags="hud")
-            acc_hud = self.canvas.create_line(bbox_hud[0]-pad_x, bbox_hud[1]-pad_y, bbox_hud[0]-pad_x, bbox_hud[3]+pad_y, fill="#00f2ff", width=4, tags="hud")
-            self.canvas.tag_lower(acc_hud, t_hud)
-            self.canvas.tag_lower(bg_hud, acc_hud)
-            
-        # 2. HUD KANAN ATAS (Toast)
-        if hasattr(self, 'toast_msg') and self.toast_msg:
-            cw = self.canvas.winfo_width()
-            if cw <= 1: cw = self.root.winfo_screenwidth() - 400 
-            
-            step = getattr(self, 'toast_step', 0)
-            
-            text_color = fade_hex_color("#ffffff", step)
-            bg_color = fade_hex_color("#1c1c1c", step)
-            outline_color = fade_hex_color("#333333", step)
-            acc_color = fade_hex_color(self.toast_color, step)
-            
-            t_toast = self.canvas.create_text(cw - 25, 20, text=f"🔔  {self.toast_msg}", fill=text_color, anchor="ne", font=hud_font, tags="hud")
-            bbox_toast = self.canvas.bbox(t_toast)
-            if bbox_toast:
-                bg_toast = self.canvas.create_rectangle(bbox_toast[0]-pad_x, bbox_toast[1]-pad_y, bbox_toast[2]+pad_x, bbox_toast[3]+pad_y, fill=bg_color, outline=outline_color, width=1, tags="hud")
-                acc_toast = self.canvas.create_line(bbox_toast[2]+pad_x, bbox_toast[1]-pad_y, bbox_toast[2]+pad_x, bbox_toast[3]+pad_y, fill=acc_color, width=4, tags="hud")
-                self.canvas.tag_lower(acc_toast, t_toast)
-                self.canvas.tag_lower(bg_toast, acc_toast)
-        
-        if self.show_annotations:
-            self.canvas.itemconfig("crosshair", state="normal")
-            self.canvas.tag_raise("crosshair")
-        else:
-            self.canvas.itemconfig("crosshair", state="hidden")
-            
-        self.canvas.tag_raise("hud")
 
     def next_image(self):
         if self.untagged_only_var.get():
@@ -1126,76 +1184,66 @@ class VisionTag_Enterprise:
                 self.current_index -= 1
                 self.load_image()
 
-    def _remove_files_for_class(self, cls_name, filename, base_name):
-        txt_path = os.path.join(self.source_dir, cls_name, 'labels', f"{base_name}.txt")
-        img_path = os.path.join(self.source_dir, cls_name, 'images', filename)
-        if os.path.exists(txt_path): os.remove(txt_path)
-        if os.path.exists(img_path): os.remove(img_path)
-
-    def final_save(self):
-        filename = self.image_list[self.current_index]
-        base_name = os.path.splitext(filename)[0]
-        src_filepath = os.path.join(self.source_dir, filename)
-        img_w, img_h = self.original_img.size
+    def show_image(self):
+        if not self.original_img: return
+        self.canvas.delete("img", "box", "hud")
         
-        old_classes = self.history_tags.get(self.current_index, set())
+        w, h = self.original_img.size
+        resized = self.original_img.resize((max(1, int(w * self.zoom_level)), max(1, int(h * self.zoom_level))), Image.Resampling.LANCZOS)
+        
+        if self.brightness != 1.0:
+            resized = ImageEnhance.Brightness(resized).enhance(self.brightness)
+        if self.contrast != 1.0:
+            resized = ImageEnhance.Contrast(resized).enhance(self.contrast)
 
-        if not self.current_boxes:
-            if old_classes:
-                if messagebox.askyesno("Remove All Labels", "Hapus semua label untuk gambar ini? File pada folder akan ikut terhapus."):
-                    for cls in old_classes:
-                        self._remove_files_for_class(cls, filename, base_name)
-                    if self.current_index in self.history_tags:
-                        del self.history_tags[self.current_index]
-                    self.next_image()
-                return
-            else:
-                self.next_image()
-                return
-
-        boxes_by_class = defaultdict(list)
-        for box in self.current_boxes:
-            boxes_by_class[box[0]].append(box)
-
-        new_classes = set(boxes_by_class.keys())
-
-        for cls_to_remove in old_classes - new_classes:
-            self._remove_files_for_class(cls_to_remove, filename, base_name)
-
-        for cls_name, boxes in boxes_by_class.items():
-            class_dir = os.path.join(self.source_dir, cls_name)
-            img_dir = os.path.join(class_dir, "images")
-            lbl_dir = os.path.join(class_dir, "labels")
+        self.tk_img = ImageTk.PhotoImage(resized)
+        self.canvas.create_image(self.img_x, self.img_y, image=self.tk_img, anchor="center", tags="img")
+        
+        self.draw_all_boxes()
+        
+        # --- DESAIN HUD ---
+        pad_x, pad_y = 12, 10
+        hud_font = ("Consolas", 9, "bold") 
+        
+        hud_text = (
+            f"ZOOM       : {int(self.zoom_level*100)}%\n"
+            f"BRIGHTNESS : {self.brightness:.1f}x\n"
+            f"CONTRAST   : {self.contrast:.1f}x"
+        )
+        
+        t_hud = self.canvas.create_text(25, 20, text=hud_text, fill="#ffffff", anchor="nw", font=hud_font, tags="hud")
+        bbox_hud = self.canvas.bbox(t_hud)
+        if bbox_hud:
+            bg_hud = self.canvas.create_rectangle(bbox_hud[0]-pad_x, bbox_hud[1]-pad_y, bbox_hud[2]+pad_x, bbox_hud[3]+pad_y, fill="#1c1c1c", outline="#333333", width=1, tags="hud")
+            acc_hud = self.canvas.create_line(bbox_hud[0]-pad_x, bbox_hud[1]-pad_y, bbox_hud[0]-pad_x, bbox_hud[3]+pad_y, fill="#00f2ff", width=4, tags="hud")
+            self.canvas.tag_lower(acc_hud, t_hud)
+            self.canvas.tag_lower(bg_hud, acc_hud)
             
-            os.makedirs(img_dir, exist_ok=True)
-            os.makedirs(lbl_dir, exist_ok=True)
+        if hasattr(self, 'toast_msg') and self.toast_msg:
+            cw = self.canvas.winfo_width()
+            if cw <= 1: cw = self.root.winfo_screenwidth() - 400 
             
-            dest_img_path = os.path.join(img_dir, filename)
-            shutil.copy(src_filepath, dest_img_path)
-
-            with open(os.path.join(class_dir, 'classes.txt'), 'w') as f:
-                f.write(f"{cls_name}\n")
-
-            notes_data = {"categories": [{"id": 0, "name": cls_name}], "info": {"year": 2026, "version": "1.0", "contributor": "Label Studio"}}
-            with open(os.path.join(class_dir, 'notes.json'), 'w') as f:
-                json.dump(notes_data, f, indent=2)
-                
-            dest_txt_path = os.path.join(lbl_dir, f"{base_name}.txt")
-            with open(dest_txt_path, 'w') as f:
-                for box in boxes:
-                    cls, cx, cy, w, h, angle = box
-                    cls_id = 0 
-                    pts = get_rotated_points(cx, cy, w, h, angle)
-                    norm_pts = []
-                    for px, py in pts:
-                        nx, ny = px / img_w, py / img_h
-                        norm_pts.extend([max(0.0, min(1.0, nx)), max(0.0, min(1.0, ny))])
-                    
-                    line = f"{cls_id} " + " ".join(f"{p:.6f}" for p in norm_pts)
-                    f.write(line + "\n")
-                
-        self.history_tags[self.current_index] = new_classes
-        self.next_image()
+            step = getattr(self, 'toast_step', 0)
+            text_color = fade_hex_color("#ffffff", step)
+            bg_color = fade_hex_color("#1c1c1c", step)
+            outline_color = fade_hex_color("#333333", step)
+            acc_color = fade_hex_color(self.toast_color, step)
+            
+            t_toast = self.canvas.create_text(cw - 25, 20, text=f"🔔  {self.toast_msg}", fill=text_color, anchor="ne", font=hud_font, tags="hud")
+            bbox_toast = self.canvas.bbox(t_toast)
+            if bbox_toast:
+                bg_toast = self.canvas.create_rectangle(bbox_toast[0]-pad_x, bbox_toast[1]-pad_y, bbox_toast[2]+pad_x, bbox_toast[3]+pad_y, fill=bg_color, outline=outline_color, width=1, tags="hud")
+                acc_toast = self.canvas.create_line(bbox_toast[2]+pad_x, bbox_toast[1]-pad_y, bbox_toast[2]+pad_x, bbox_toast[3]+pad_y, fill=acc_color, width=4, tags="hud")
+                self.canvas.tag_lower(acc_toast, t_toast)
+                self.canvas.tag_lower(bg_toast, acc_toast)
+        
+        if self.show_annotations:
+            self.canvas.itemconfig("crosshair", state="normal")
+            self.canvas.tag_raise("crosshair")
+        else:
+            self.canvas.itemconfig("crosshair", state="hidden")
+            
+        self.canvas.tag_raise("hud")
 
 if __name__ == "__main__":
     root = tk.Tk()
