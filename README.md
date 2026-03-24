@@ -3,7 +3,6 @@
 ![Python](https://img.shields.io/badge/python-3.8+-blue.svg)
 ![Tkinter](https://img.shields.io/badge/GUI-Tkinter-lightgrey.svg)
 ![YOLOv8](https://img.shields.io/badge/AI-Ultralytics_YOLOv8-purple.svg)
-![License](https://img.shields.io/badge/license-MIT-green.svg)
 
 **VisionTag** is a professional-grade, locally-hosted desktop application designed for annotating complex, overlapping objects in images (specifically optimized for X-Ray imagery) using **Oriented Bounding Boxes (OBB)**. 
 
