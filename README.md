@@ -13,15 +13,15 @@ Built with Python and Tkinter, it provides an enterprise-level workflow for Data
 
 ## ✨ Key Features
 
-**🪄 AI Auto-Detect (Pre-labeling):** Integrated with Ultralytics YOLOv8. Load your trained `.pt` model and let the AI predict and draw the OBBs automatically. You only need to review and adjust the generated bounding boxes!
-**🎛️ Data Augmentation Generator:** Multiply your dataset instantly. Automatically generate 90°, 180°, and 270° rotated copies of your images along with precisely recalculated OBB coordinates.
-**📊 Analytics Dashboard:** A real-time, interactive bar chart showing your dataset distribution to help you identify and prevent data imbalance before training your models.
-**📂 Bulk Actions & Synchronization:** Rename classes across thousands of `.txt` and `.json` files instantly without breaking the dataset directory structure.
-**🔄 Enterprise QoL (Quality of Life):**
-  **Z-Order Management:** Click on overlapping boxes to dynamically bring them to the front.
-  **Unlimited Undo/Redo:** Full state-history stack (`Ctrl+Z` / `Ctrl+Y`) for seamless error corrections.
-  **Dynamic Neon Hashing:** Auto-generates high-contrast colors for each unique class using MD5 hashing.
-  **Modern HUD:** Real-time fading toast notifications and image parameter overlays (Zoom, Brightness, Contrast).
+* **🪄 AI Auto-Detect (Pre-labeling):** Integrated with Ultralytics YOLOv8. Load your trained `.pt` model and let the AI predict and draw the OBBs automatically. You only need to review and adjust the generated bounding boxes!
+* **🎛️ Data Augmentation Generator:** Multiply your dataset instantly. Automatically generate 90°, 180°, and 270° rotated copies of your images along with precisely recalculated OBB coordinates.
+* **📊 Analytics Dashboard:** A real-time, interactive bar chart showing your dataset distribution to help you identify and prevent data imbalance before training your models.
+* **📂 Bulk Actions & Synchronization:** Rename classes across thousands of `.txt` and `.json` files instantly without breaking the dataset directory structure.
+* **🔄 Enterprise QoL (Quality of Life):**
+  * **Z-Order Management:** Click on overlapping boxes to dynamically bring them to the front.
+  * **Unlimited Undo/Redo:** Full state-history stack (`Ctrl+Z` / `Ctrl+Y`) for seamless error corrections.
+  * **Dynamic Neon Hashing:** Auto-generates high-contrast colors for each unique class using MD5 hashing.
+  * **Modern HUD:** Real-time fading toast notifications and image parameter overlays (Zoom, Brightness, Contrast).
 
 ---
 

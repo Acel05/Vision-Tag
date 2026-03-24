@@ -1,0 +1,24 @@
+# Python Cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Virtual Environments
+venv/
+env/
+ENV/
+
+# YOLO & AI Models (Ignore large model weights)
+*.pt
+*.onnx
+
+# Application Data (Ignore your local datasets)
+classes.txt
+datasets/
+images/
+labels/
