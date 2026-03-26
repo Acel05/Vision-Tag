@@ -7,6 +7,7 @@ from collections import defaultdict
 import json
 import copy
 import math
+import numpy as np # <-- Tambahan import untuk Gaussian Noise
 
 # --- IMPORT MODULAR UTILITIES ---
 from utils.geometry import get_rotated_points, get_local_coords, is_point_in_box
@@ -304,7 +305,7 @@ class VisionTag_Enterprise:
 
 
     # ==============================================================
-    # AI, RENAME, & AUGMENTATION LOGIC
+    # AI, RENAME, & AUGMENTATION LOGIC (DIPERBARUI)
     # ==============================================================
 
     def run_auto_detect(self):
@@ -343,6 +344,7 @@ class VisionTag_Enterprise:
                         if cls_name not in self.master_classes:
                             self.master_classes.append(cls_name)
                             self._save_external_config()
+                            self._update_filter_combo_values()
                         
                         angle = math.degrees(rad)
                         self.current_boxes.append([cls_name, cx, cy, w, h, angle])
@@ -418,7 +420,7 @@ class VisionTag_Enterprise:
             idx = self.master_classes.index(old_name)
             self.master_classes[idx] = new_name
             self._save_external_config()
-            self._update_filter_combo_values() # Update Dropdown
+            self._update_filter_combo_values() 
             
         for img_idx, tags in self.history_tags.items():
             if old_name in tags:
@@ -445,107 +447,127 @@ class VisionTag_Enterprise:
             return
 
         dialog = tk.Toplevel(self.root)
-        dialog.title("🎛️ Augment Data (Rotation)")
-        dialog.geometry("380x280")
+        dialog.title("🎛️ Augment Data (Generative)")
+        dialog.geometry("450x380")
         dialog.configure(bg="#1e1e1e")
         dialog.transient(self.root)
         dialog.grab_set()
 
-        tk.Label(dialog, text="Duplikasi Data & Label (Rotate)", bg="#1e1e1e", fg="#00f2ff", font=("Segoe UI", 12, "bold")).pack(pady=(15, 5))
-        
+        tk.Label(dialog, text="Generate Varian Data Baru", bg="#1e1e1e", fg="#00f2ff", font=("Segoe UI", 12, "bold")).pack(pady=(15, 5))
+        tk.Label(dialog, text="Pilih satu atau lebih teknik augmentasi:", bg="#1e1e1e", fg="#aaa", font=("Segoe UI", 9)).pack(pady=(0, 10))
+
         self.rot_90_var = tk.BooleanVar(value=False)
         self.rot_180_var = tk.BooleanVar(value=False)
         self.rot_270_var = tk.BooleanVar(value=False)
-        
-        frame_opts = tk.Frame(dialog, bg="#1e1e1e")
-        frame_opts.pack(pady=15)
-        
-        tk.Checkbutton(frame_opts, text="Rotasi 90° Clockwise", variable=self.rot_90_var, bg="#1e1e1e", fg="#fff", selectcolor="#2d2d2d", activebackground="#1e1e1e", activeforeground="#00f2ff", font=("Segoe UI", 10)).grid(row=0, column=0, sticky="w", pady=2)
-        tk.Checkbutton(frame_opts, text="Rotasi 180° Upside Down", variable=self.rot_180_var, bg="#1e1e1e", fg="#fff", selectcolor="#2d2d2d", activebackground="#1e1e1e", activeforeground="#00f2ff", font=("Segoe UI", 10)).grid(row=1, column=0, sticky="w", pady=2)
-        tk.Checkbutton(frame_opts, text="Rotasi 270° Clockwise", variable=self.rot_270_var, bg="#1e1e1e", fg="#fff", selectcolor="#2d2d2d", activebackground="#1e1e1e", activeforeground="#00f2ff", font=("Segoe UI", 10)).grid(row=2, column=0, sticky="w", pady=2)
+        self.hflip_var = tk.BooleanVar(value=False)
+        self.bright_var = tk.BooleanVar(value=False)
+        self.noise_var = tk.BooleanVar(value=False)
+
+        main_frame = tk.Frame(dialog, bg="#1e1e1e")
+        main_frame.pack(fill="x", padx=30, pady=5)
+        col1 = tk.Frame(main_frame, bg="#1e1e1e"); col1.pack(side="left", fill="y", expand=True)
+        col2 = tk.Frame(main_frame, bg="#1e1e1e"); col2.pack(side="right", fill="y", expand=True)
+
+        tk.Label(col1, text="Geometris (Posisi Berubah)", bg="#1e1e1e", fg="#fff", font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(0,5))
+        tk.Checkbutton(col1, text="Rotasi 90° Clockwise", variable=self.rot_90_var, bg="#1e1e1e", fg="#aaa", selectcolor="#2d2d2d", activebackground="#1e1e1e", activeforeground="#00f2ff").pack(anchor="w")
+        tk.Checkbutton(col1, text="Rotasi 180° Upside Down", variable=self.rot_180_var, bg="#1e1e1e", fg="#aaa", selectcolor="#2d2d2d", activebackground="#1e1e1e", activeforeground="#00f2ff").pack(anchor="w")
+        tk.Checkbutton(col1, text="Rotasi 270° Clockwise", variable=self.rot_270_var, bg="#1e1e1e", fg="#aaa", selectcolor="#2d2d2d", activebackground="#1e1e1e", activeforeground="#00f2ff").pack(anchor="w")
+        tk.Checkbutton(col1, text="Horizontal Flip (Cermin)", variable=self.hflip_var, bg="#1e1e1e", fg="#00ff00", selectcolor="#2d2d2d", activebackground="#1e1e1e", activeforeground="#00ff00").pack(anchor="w")
+
+        tk.Label(col2, text="Pixel (Posisi Tetap)", bg="#1e1e1e", fg="#fff", font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(0,5))
+        tk.Checkbutton(col2, text="Brightness (+30%)", variable=self.bright_var, bg="#1e1e1e", fg="#ffd700", selectcolor="#2d2d2d", activebackground="#1e1e1e", activeforeground="#ffd700").pack(anchor="w")
+        tk.Checkbutton(col2, text="Add Gaussian Noise", variable=self.noise_var, bg="#1e1e1e", fg="#ff8c00", selectcolor="#2d2d2d", activebackground="#1e1e1e", activeforeground="#ff8c00").pack(anchor="w")
 
         def execute():
-            angles = []
-            if self.rot_90_var.get(): angles.append(90)
-            if self.rot_180_var.get(): angles.append(180)
-            if self.rot_270_var.get(): angles.append(270)
-            
-            if not angles:
-                messagebox.showwarning("Warning", "Pilih setidaknya satu sudut rotasi!")
+            actions = []
+            if self.rot_90_var.get(): actions.append('rot90')
+            if self.rot_180_var.get(): actions.append('rot180')
+            if self.rot_270_var.get(): actions.append('rot270')
+            if self.hflip_var.get(): actions.append('hflip')
+            if self.bright_var.get(): actions.append('bright')
+            if self.noise_var.get(): actions.append('noise')
+
+            if not actions:
+                messagebox.showwarning("Warning", "Pilih setidaknya satu teknik augmentasi!")
                 return
-                
-            for angle in angles:
-                self.execute_augmentation(angle)
-                
+            for action in actions:
+                self.execute_augmentation(action)
             dialog.destroy()
-            self.set_status_message(f"Berhasil membuat {len(angles)} gambar augmentasi!", "#00ff00", 3000)
+            self.set_status_message(f"Berhasil membuat {len(actions)} gambar augmentasi!", "#00ff00", 3000)
 
-        tk.Button(dialog, text="GENERATE AUGMENTED COPY", bg="#008080", fg="white", font=("Segoe UI", 10, "bold"), relief="flat", command=execute).pack(fill="x", padx=30, pady=5)
+        tk.Button(dialog, text="GENERATE AUGMENTED COPY", bg="#008080", fg="white", font=("Segoe UI", 10, "bold"), relief="flat", command=execute).pack(fill="x", padx=30, pady=25, ipady=5)
 
-    def execute_augmentation(self, angle):
+    def execute_augmentation(self, action):
         filename = self.image_list[self.current_index]
         base_name, ext = os.path.splitext(filename)
-        new_filename = f"{base_name}_rot{angle}{ext}"
-        new_basename = f"{base_name}_rot{angle}"
-        
-        if new_filename in self.image_list:
-            return 
-            
-        old_w, old_h = self.original_img.size
-        new_img = self.original_img.rotate(-angle, expand=True)
-        new_w, new_h = new_img.size
+        new_filename = f"{base_name}_{action}{ext}"
+        new_basename = f"{base_name}_{action}"
 
+        if new_filename in self.image_list: return 
+
+        old_w, old_h = self.original_img.size
+        new_img = None
         new_boxes = []
-        for box in self.current_boxes:
-            cls_name, cx, cy, w, h, box_angle = box
-            if angle == 90:
-                new_cx, new_cy = old_h - cy, cx
-            elif angle == 180:
-                new_cx, new_cy = old_w - cx, old_h - cy
-            elif angle == 270:
-                new_cx, new_cy = cy, old_w - cx
-                
-            new_box_angle = (box_angle + angle) % 360
-            new_boxes.append([cls_name, new_cx, new_cy, w, h, new_box_angle])
+
+        if action.startswith('rot'):
+            angle = int(action.replace('rot', ''))
+            new_img = self.original_img.rotate(-angle, expand=True)
+            for box in self.current_boxes:
+                cls_name, cx, cy, w, h, box_angle = box
+                if angle == 90: new_cx, new_cy = old_h - cy, cx
+                elif angle == 180: new_cx, new_cy = old_w - cx, old_h - cy
+                elif angle == 270: new_cx, new_cy = cy, old_w - cx
+                new_boxes.append([cls_name, new_cx, new_cy, w, h, (box_angle + angle) % 360])
+
+        elif action == 'hflip':
+            new_img = self.original_img.transpose(Image.FLIP_LEFT_RIGHT)
+            for box in self.current_boxes:
+                cls_name, cx, cy, w, h, box_angle = box
+                new_cx = old_w - cx 
+                new_box_angle = (180 - box_angle) % 360 
+                new_boxes.append([cls_name, new_cx, cy, w, h, new_box_angle])
+
+        elif action == 'bright':
+            enhancer = ImageEnhance.Brightness(self.original_img)
+            new_img = enhancer.enhance(1.3) 
+            new_boxes = copy.deepcopy(self.current_boxes) 
+
+        elif action == 'noise':
+            img_arr = np.array(self.original_img)
+            noise = np.random.randint(-30, 30, img_arr.shape, dtype='int16')
+            img_arr = np.clip(img_arr.astype('int16') + noise, 0, 255).astype('uint8')
+            new_img = Image.fromarray(img_arr)
+            new_boxes = copy.deepcopy(self.current_boxes)
+
+        if not new_img: return
+        new_w, new_h = new_img.size
 
         new_src_path = os.path.join(self.source_dir, new_filename)
         new_img.save(new_src_path)
         self.image_list.append(new_filename)
-        
-        boxes_by_class = defaultdict(list)
-        for box in new_boxes:
-            boxes_by_class[box[0]].append(box)
 
+        boxes_by_class = defaultdict(list)
+        for box in new_boxes: boxes_by_class[box[0]].append(box)
         new_classes = set(boxes_by_class.keys())
 
         for cls_name, boxes in boxes_by_class.items():
             class_dir = os.path.join(self.source_dir, cls_name)
-            img_dir = os.path.join(class_dir, "images")
-            lbl_dir = os.path.join(class_dir, "labels")
-            
-            os.makedirs(img_dir, exist_ok=True)
-            os.makedirs(lbl_dir, exist_ok=True)
-            
+            img_dir, lbl_dir = os.path.join(class_dir, "images"), os.path.join(class_dir, "labels")
+            os.makedirs(img_dir, exist_ok=True); os.makedirs(lbl_dir, exist_ok=True)
+
             dest_img_path = os.path.join(img_dir, new_filename)
             shutil.copy2(new_src_path, dest_img_path)
 
-            with open(os.path.join(class_dir, 'classes.txt'), 'w') as f:
-                f.write(f"{cls_name}\n")
-                
-            dest_txt_path = os.path.join(lbl_dir, f"{new_basename}.txt")
-            with open(dest_txt_path, 'w') as f:
+            with open(os.path.join(class_dir, 'classes.txt'), 'w') as f: f.write(f"{cls_name}\n")
+            with open(os.path.join(lbl_dir, f"{new_basename}.txt"), 'w') as f:
                 for box in boxes:
                     cls, cx, cy, w, h, box_ang = box
-                    cls_id = 0 
                     pts = get_rotated_points(cx, cy, w, h, box_ang)
                     norm_pts = []
                     for px, py in pts:
-                        nx, ny = px / new_w, py / new_h
-                        norm_pts.extend([max(0.0, min(1.0, nx)), max(0.0, min(1.0, ny))])
-                    
-                    line = f"{cls_id} " + " ".join(f"{p:.6f}" for p in norm_pts)
-                    f.write(line + "\n")
-                    
+                        norm_pts.extend([max(0.0, min(1.0, px/new_w)), max(0.0, min(1.0, py/new_h))])
+                    f.write(f"0 " + " ".join(f"{p:.6f}" for p in norm_pts) + "\n")
+
         new_index = len(self.image_list) - 1
         self.history_tags[new_index] = new_classes
         self.root.update()
@@ -584,11 +606,9 @@ class VisionTag_Enterprise:
                 self.filter_class_var.set("All Classes")
 
     def _is_image_valid_for_filter(self, idx):
-        # Filter Untagged Only
         if self.untagged_only_var.get() and idx in self.history_tags:
             return False
             
-        # Filter Specific Class
         filter_cls = getattr(self, 'filter_class_var', None)
         if filter_cls and filter_cls.get() != "All Classes":
             if idx not in self.history_tags:
@@ -607,18 +627,15 @@ class VisionTag_Enterprise:
         if self.filter_class_var.get() != "All Classes":
             self.untagged_only_var.set(False)
 
-        # Cek apakah gambar saat ini masih valid di bawah filter baru
         if self._is_image_valid_for_filter(self.current_index):
             return
             
-        # Jika tidak, cari gambar berikutnya yang valid
         for i in range(self.current_index + 1, len(self.image_list)):
             if self._is_image_valid_for_filter(i):
                 self.current_index = i
                 self.load_image()
                 return
                 
-        # Jika tidak ada di depan, cari dari awal
         for i in range(0, self.current_index):
             if self._is_image_valid_for_filter(i):
                 self.current_index = i
@@ -781,7 +798,7 @@ class VisionTag_Enterprise:
         
         tk.Button(action_frame, text="🪄 AUTO-DETECT (AI)", bg="#8a2be2", fg="white", relief="flat", font=("Segoe UI", 8, "bold"), pady=3, command=self.run_auto_detect).pack(fill="x", pady=(0, 6))
         tk.Button(action_frame, text="📂 BULK RENAME CLASS", bg="#ff8c00", fg="white", relief="flat", font=("Segoe UI", 8, "bold"), pady=3, command=self.show_bulk_rename_dialog).pack(fill="x", pady=(0, 6))
-        tk.Button(action_frame, text="🎛️ AUGMENT DATA (ROTATE)", bg="#008080", fg="white", relief="flat", font=("Segoe UI", 8, "bold"), pady=3, command=self.show_augmentation_dialog).pack(fill="x")
+        tk.Button(action_frame, text="🎛️ AUGMENT DATA", bg="#008080", fg="white", relief="flat", font=("Segoe UI", 8, "bold"), pady=3, command=self.show_augmentation_dialog).pack(fill="x")
 
         tk.Label(self.sidebar, text="ACTIVE / SELECTED CLASS", bg="#1e1e1e", fg="#00f2ff", font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=20, pady=(10, 2))
         self.queue_list = tk.Listbox(self.sidebar, height=1, bg="#121212", fg="#00f2ff", borderwidth=0, highlightthickness=1, font=("Segoe UI", 12, "bold"))
@@ -861,10 +878,9 @@ class VisionTag_Enterprise:
         self.jump_entry.pack(side="left", padx=10, ipady=3)
         self.jump_entry.bind("<Return>", self.jump_to_image)
 
-        tk.Checkbutton(info_mid, text="Untagged Only", variable=self.untagged_only_var, bg="#1e1e1e", fg="#aaa", selectcolor="#2d2d2d", activebackground="#1e1e1e", activeforeground="#00f2ff", cursor="hand2", command=self._on_untagged_toggle).pack(side="left", padx=(5, 0))
+        tk.Checkbutton(info_mid, text="Untagged", variable=self.untagged_only_var, bg="#1e1e1e", fg="#aaa", selectcolor="#2d2d2d", activebackground="#1e1e1e", activeforeground="#00f2ff", cursor="hand2", command=self._on_untagged_toggle).pack(side="left", padx=(5, 0))
 
-        # --- FITUR BARU: FILTER KELAS ---
-        tk.Label(info_mid, text=" | Filter Class:", bg="#1e1e1e", fg="#888", font=("Segoe UI", 9, "bold")).pack(side="left", padx=(10, 5))
+        tk.Label(info_mid, text=" | Filter:", bg="#1e1e1e", fg="#888", font=("Segoe UI", 9, "bold")).pack(side="left", padx=(10, 5))
         self.filter_combo = ttk.Combobox(info_mid, textvariable=self.filter_class_var, state="readonly", width=15, font=("Segoe UI", 9))
         self.filter_combo.pack(side="left", padx=(0, 10))
         self.filter_combo.bind("<<ComboboxSelected>>", self.apply_filter)
