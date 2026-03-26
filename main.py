@@ -52,6 +52,7 @@ class VisionTag_Enterprise:
             self.root.destroy()
             return
 
+        # Simpan nama asli gambar untuk presisi filtering & deduplikasi
         self.raw_basenames = {os.path.splitext(f)[0] for f in self.image_list}
 
         self.load_external_config()
@@ -77,24 +78,29 @@ class VisionTag_Enterprise:
         self.show_annotations = True
         self.brightness = 1.0
         self.contrast = 1.0
+        
+        # State Filter
         self.untagged_only_var = tk.BooleanVar(value=False)
+        self.filter_class_var = tk.StringVar(value="All Classes")
 
         self.setup_ui()
         self.setup_shortcuts()
         self.load_image()
 
     # =======================================================
-    # CORE FIX: SUPER PRECISION MATCHING & SCANNING
+    # CORE FIX: SUPER PRECISION MATCHING
     # =======================================================
 
     def _is_matching_file(self, filename, base_name, extension=".txt"):
+        """Mencocokkan file label dengan nama asli TANPA merampok label gambar lain."""
         target = f"{base_name}{extension}"
         if filename == target:
             return True
             
         if filename.endswith(target):
             full_label_basename = filename[:-len(extension)]
-            if full_label_basename in self.raw_basenames and full_label_basename != base_name:
+            
+            if full_label_basename in getattr(self, 'raw_basenames', set()) and full_label_basename != base_name:
                 return False
                 
             prefix_len = len(filename) - len(target)
@@ -246,6 +252,7 @@ class VisionTag_Enterprise:
 
         new_classes = set(boxes_by_class.keys())
 
+        # Cleanup class lama
         for cls_to_remove in old_classes - new_classes:
             self._remove_files_for_class(cls_to_remove, filename, base_name)
 
@@ -411,6 +418,7 @@ class VisionTag_Enterprise:
             idx = self.master_classes.index(old_name)
             self.master_classes[idx] = new_name
             self._save_external_config()
+            self._update_filter_combo_values() # Update Dropdown
             
         for img_idx, tags in self.history_tags.items():
             if old_name in tags:
@@ -564,25 +572,90 @@ class VisionTag_Enterprise:
             for cls in self.master_classes:
                 f.write(f"{cls}\n")
 
-    def push_state(self):
-        self.undo_stack.append(copy.deepcopy(self.current_boxes))
-        self.redo_stack.clear() 
+    # ==============================================================
+    # FITUR BARU: GALLERY FILTER KELAS & UNTAGGED
+    # ==============================================================
 
-    def perform_undo(self):
-        if self.undo_stack:
-            self.redo_stack.append(copy.deepcopy(self.current_boxes))
-            self.current_boxes = self.undo_stack.pop()
-            self.selected_box_idx = -1
-            self.show_image()
-            self.set_status_message("UNDO successful", "#ffd700")
+    def _update_filter_combo_values(self):
+        if hasattr(self, 'filter_combo'):
+            vals = ["All Classes"] + sorted(self.master_classes)
+            self.filter_combo['values'] = vals
+            if self.filter_class_var.get() not in vals:
+                self.filter_class_var.set("All Classes")
 
-    def perform_redo(self):
-        if self.redo_stack:
-            self.undo_stack.append(copy.deepcopy(self.current_boxes))
-            self.current_boxes = self.redo_stack.pop()
-            self.selected_box_idx = -1
-            self.show_image()
-            self.set_status_message("REDO successful", "#00f2ff")
+    def _is_image_valid_for_filter(self, idx):
+        # Filter Untagged Only
+        if self.untagged_only_var.get() and idx in self.history_tags:
+            return False
+            
+        # Filter Specific Class
+        filter_cls = getattr(self, 'filter_class_var', None)
+        if filter_cls and filter_cls.get() != "All Classes":
+            if idx not in self.history_tags:
+                return False
+            if filter_cls.get() not in self.history_tags[idx]:
+                return False
+                
+        return True
+
+    def _on_untagged_toggle(self):
+        if self.untagged_only_var.get():
+            self.filter_class_var.set("All Classes")
+        self.apply_filter()
+
+    def apply_filter(self, event=None):
+        if self.filter_class_var.get() != "All Classes":
+            self.untagged_only_var.set(False)
+
+        # Cek apakah gambar saat ini masih valid di bawah filter baru
+        if self._is_image_valid_for_filter(self.current_index):
+            return
+            
+        # Jika tidak, cari gambar berikutnya yang valid
+        for i in range(self.current_index + 1, len(self.image_list)):
+            if self._is_image_valid_for_filter(i):
+                self.current_index = i
+                self.load_image()
+                return
+                
+        # Jika tidak ada di depan, cari dari awal
+        for i in range(0, self.current_index):
+            if self._is_image_valid_for_filter(i):
+                self.current_index = i
+                self.load_image()
+                return
+        
+        messagebox.showinfo("Not Found", "Tidak ada gambar yang cocok dengan filter yang dipilih.")
+        self.filter_class_var.set("All Classes")
+        self.untagged_only_var.set(False)
+
+    def next_image(self):
+        for i in range(self.current_index + 1, len(self.image_list)):
+            if self._is_image_valid_for_filter(i):
+                self.current_index = i
+                self.load_image()
+                return
+        messagebox.showinfo("Akhir Galeri", "Sudah mencapai gambar terakhir untuk kriteria ini.")
+
+    def prev_image(self):
+        for i in range(self.current_index - 1, -1, -1):
+            if self._is_image_valid_for_filter(i):
+                self.current_index = i
+                self.load_image()
+                return
+        messagebox.showinfo("Awal Galeri", "Sudah mencapai gambar pertama untuk kriteria ini.")
+
+    def auto_skip_to_untagged(self):
+        for i in range(len(self.image_list)):
+            if i not in self.history_tags:
+                self.current_index = i
+                break
+        else:
+            self.current_index = len(self.image_list) - 1 if self.image_list else 0
+
+    # ==============================================================
+    # SISA KODE (DASHBOARD, UI SETUP, RENDER TAGS, DLL)
+    # ==============================================================
 
     def show_dashboard(self):
         dash = tk.Toplevel(self.root)
@@ -662,18 +735,6 @@ class VisionTag_Enterprise:
             percent = (counts[cls_name] / total_duplicated_images) * 100 if total_duplicated_images > 0 else 0
             stats_text = f"{counts[cls_name]} imgs  ({percent:.1f}%)"
             tk.Label(row, text=stats_text, fg="#fff", bg=row_bg, font=("Consolas", 10)).pack(side="left", padx=10)
-
-    def auto_skip_to_untagged(self):
-        for i in range(len(self.image_list)):
-            if i not in self.history_tags:
-                self.current_index = i
-                break
-        else:
-            self.current_index = len(self.image_list) - 1 if self.image_list else 0
-
-    # ==============================================================
-    # UI SETUP & SHORTCUTS
-    # ==============================================================
 
     def setup_shortcuts(self):
         def is_not_typing(e):
@@ -794,13 +855,20 @@ class VisionTag_Enterprise:
         info_mid = tk.Frame(self.nav_info_bar, bg="#1e1e1e")
         info_mid.pack(side="left", fill="x", expand=True)
 
-        tk.Label(info_mid, text="Go to / Search:", bg="#1e1e1e", fg="#888", font=("Segoe UI", 9)).pack(side="left")
+        tk.Label(info_mid, text="Go to:", bg="#1e1e1e", fg="#888", font=("Segoe UI", 9)).pack(side="left")
         self.jump_var = tk.StringVar()
-        self.jump_entry = tk.Entry(info_mid, textvariable=self.jump_var, width=15, bg="#2d2d2d", fg="#00f2ff", borderwidth=0, justify="center", font=("Consolas", 11, "bold"))
+        self.jump_entry = tk.Entry(info_mid, textvariable=self.jump_var, width=10, bg="#2d2d2d", fg="#00f2ff", borderwidth=0, justify="center", font=("Consolas", 11, "bold"))
         self.jump_entry.pack(side="left", padx=10, ipady=3)
         self.jump_entry.bind("<Return>", self.jump_to_image)
 
-        tk.Checkbutton(info_mid, text="Show Untagged Only", variable=self.untagged_only_var, bg="#1e1e1e", fg="#aaa", selectcolor="#2d2d2d", activebackground="#1e1e1e", activeforeground="#00f2ff", cursor="hand2").pack(side="left", padx=(10, 0))
+        tk.Checkbutton(info_mid, text="Untagged Only", variable=self.untagged_only_var, bg="#1e1e1e", fg="#aaa", selectcolor="#2d2d2d", activebackground="#1e1e1e", activeforeground="#00f2ff", cursor="hand2", command=self._on_untagged_toggle).pack(side="left", padx=(5, 0))
+
+        # --- FITUR BARU: FILTER KELAS ---
+        tk.Label(info_mid, text=" | Filter Class:", bg="#1e1e1e", fg="#888", font=("Segoe UI", 9, "bold")).pack(side="left", padx=(10, 5))
+        self.filter_combo = ttk.Combobox(info_mid, textvariable=self.filter_class_var, state="readonly", width=15, font=("Segoe UI", 9))
+        self.filter_combo.pack(side="left", padx=(0, 10))
+        self.filter_combo.bind("<<ComboboxSelected>>", self.apply_filter)
+        self._update_filter_combo_values()
 
         self.save_indicator = tk.Label(info_mid, text="", bg="#1e1e1e", font=("Segoe UI", 12))
         self.save_indicator.pack(side="left", padx=2)
@@ -850,9 +918,25 @@ class VisionTag_Enterprise:
             self.show_image()
             self.toast_timer = self.root.after(40, self.fade_out_toast)
 
-    def clear_toast_message(self):
-        self.toast_msg = ""
-        self.show_image()
+    def push_state(self):
+        self.undo_stack.append(copy.deepcopy(self.current_boxes))
+        self.redo_stack.clear() 
+
+    def perform_undo(self):
+        if self.undo_stack:
+            self.redo_stack.append(copy.deepcopy(self.current_boxes))
+            self.current_boxes = self.undo_stack.pop()
+            self.selected_box_idx = -1
+            self.show_image()
+            self.set_status_message("UNDO successful", "#ffd700")
+
+    def perform_redo(self):
+        if self.redo_stack:
+            self.undo_stack.append(copy.deepcopy(self.current_boxes))
+            self.current_boxes = self.redo_stack.pop()
+            self.selected_box_idx = -1
+            self.show_image()
+            self.set_status_message("REDO successful", "#00f2ff")
 
     def copy_box(self):
         if self.selected_box_idx != -1 and self.selected_box_idx < len(self.current_boxes):
@@ -868,6 +952,7 @@ class VisionTag_Enterprise:
             ox, oy = self.canvas_to_img(self.current_mouse_x, self.current_mouse_y)
             new_box[1] = ox
             new_box[2] = oy
+            
             self.current_boxes.append(new_box)
             self.selected_box_idx = len(self.current_boxes) - 1 
             self.show_image()
@@ -918,6 +1003,7 @@ class VisionTag_Enterprise:
                 self.master_classes.remove(cls_name)
                 self._save_external_config() 
                 self.render_tags() 
+                self._update_filter_combo_values()
                 
                 if self.get_active_class() == cls_name:
                     self.queue_list.delete(0, tk.END)
@@ -928,11 +1014,13 @@ class VisionTag_Enterprise:
     def set_active_class(self, tag):
         self.queue_list.delete(0, tk.END)
         self.queue_list.insert(tk.END, tag)
+        
         if self.selected_box_idx != -1 and self.selected_box_idx < len(self.current_boxes):
             self.push_state()
             self.current_boxes[self.selected_box_idx][0] = tag
             self.show_image()
             self.set_status_message(f"Label updated to {tag}", "#00ff00")
+            
         self.canvas.focus_set() 
 
     def get_active_class(self):
@@ -946,6 +1034,8 @@ class VisionTag_Enterprise:
             self._save_external_config()
             self.search_var.set("")
             self.render_tags()
+            self._update_filter_combo_values()
+            
         self.canvas.focus_set()
         return "break"
 
@@ -1003,9 +1093,11 @@ class VisionTag_Enterprise:
             for i in reversed(range(len(self.current_boxes))):
                 if is_point_in_box(ox, oy, self.current_boxes[i]):
                     self.push_state() 
+                    
                     rotated_box = self.current_boxes.pop(i)
                     self.current_boxes.append(rotated_box)
                     self.selected_box_idx = len(self.current_boxes) - 1
+                    
                     step = 5 if delta > 0 else -5 
                     self.current_boxes[-1][5] = (self.current_boxes[-1][5] + step) % 360
                     self.show_image()
@@ -1044,6 +1136,7 @@ class VisionTag_Enterprise:
             box = self.current_boxes[i]
             if is_point_in_box(ox, oy, box):
                 self.push_state()
+                
                 clicked_box = self.current_boxes.pop(i)
                 self.current_boxes.append(clicked_box)
                 self.selected_box_idx = len(self.current_boxes) - 1  
@@ -1072,6 +1165,7 @@ class VisionTag_Enterprise:
                     self.resize_axis = "height"
                 else:
                     self.action_mode = "move"
+                
                 self.show_image() 
                 return
 
@@ -1094,6 +1188,7 @@ class VisionTag_Enterprise:
             dx = ox - self.start_ox
             dy = oy - self.start_oy
             orig_cx, orig_cy, _, _, _ = self.interact_start_state
+            
             self.current_boxes[self.selected_box_idx][1] = orig_cx + dx
             self.current_boxes[self.selected_box_idx][2] = orig_cy + dy
             self.show_image()
@@ -1101,6 +1196,7 @@ class VisionTag_Enterprise:
         elif self.action_mode == "resize":
             orig_cx, orig_cy, orig_w, orig_h, orig_angle = self.interact_start_state
             lx, ly = get_local_coords(ox, oy, orig_cx, orig_cy, orig_angle)
+            
             if self.resize_axis in ("both", "width"):
                 self.current_boxes[self.selected_box_idx][3] = max(10, abs(lx) * 2)
             if self.resize_axis in ("both", "height"):
@@ -1127,9 +1223,9 @@ class VisionTag_Enterprise:
                 self.current_boxes.append([active_class, ocx, ocy, ow, oh, 0.0])
                 self.selected_box_idx = len(self.current_boxes) - 1
             self.show_image()
+            
         self.action_mode = "none"
 
-    # --- MISSING FUNCTIONS ADDED BACK ---
     def clear_all_boxes(self):
         self.push_state()
         self.current_boxes.clear()
@@ -1156,33 +1252,9 @@ class VisionTag_Enterprise:
             
             text_x, text_y = self.img_to_canvas(pts[0][0], pts[0][1])
             font_size = max(7, int(11 * self.zoom_level))
+            
             self.canvas.create_text(text_x + 1, text_y - 2 + 1, text=cls_name, fill="#000000", anchor="sw", font=("Segoe UI", font_size, "bold"), tags="box")
             self.canvas.create_text(text_x, text_y - 2, text=cls_name, fill=outline_color, anchor="sw", font=("Segoe UI", font_size, "bold"), tags="box")
-
-    def next_image(self):
-        if self.untagged_only_var.get():
-            for i in range(self.current_index + 1, len(self.image_list)):
-                if i not in self.history_tags:
-                    self.current_index = i
-                    self.load_image()
-                    return
-            messagebox.showinfo("Complete", "Semua gambar sudah di-label!")
-        else:
-            if self.current_index < len(self.image_list) - 1:
-                self.current_index += 1
-                self.load_image()
-
-    def prev_image(self):
-        if self.untagged_only_var.get():
-            for i in range(self.current_index - 1, -1, -1):
-                if i not in self.history_tags:
-                    self.current_index = i
-                    self.load_image()
-                    return
-        else:
-            if self.current_index > 0:
-                self.current_index -= 1
-                self.load_image()
 
     def show_image(self):
         if not self.original_img: return
@@ -1197,11 +1269,11 @@ class VisionTag_Enterprise:
             resized = ImageEnhance.Contrast(resized).enhance(self.contrast)
 
         self.tk_img = ImageTk.PhotoImage(resized)
+        
         self.canvas.create_image(self.img_x, self.img_y, image=self.tk_img, anchor="center", tags="img")
         
         self.draw_all_boxes()
         
-        # --- DESAIN HUD ---
         pad_x, pad_y = 12, 10
         hud_font = ("Consolas", 9, "bold") 
         
@@ -1224,6 +1296,7 @@ class VisionTag_Enterprise:
             if cw <= 1: cw = self.root.winfo_screenwidth() - 400 
             
             step = getattr(self, 'toast_step', 0)
+            
             text_color = fade_hex_color("#ffffff", step)
             bg_color = fade_hex_color("#1c1c1c", step)
             outline_color = fade_hex_color("#333333", step)
