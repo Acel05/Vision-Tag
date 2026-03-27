@@ -360,34 +360,51 @@ class VisionTag_Enterprise:
             messagebox.showerror("Dependency Missing", "Install via terminal:\npip install ultralytics")
             return
             
+        # 1. If model isn't loaded yet, ask for path and load it in a background thread
         if self.ai_model is None:
             model_path = filedialog.askopenfilename(title="Select Trained YOLOv8 OBB Model (.pt)", filetypes=[("PyTorch Model", "*.pt")])
             if not model_path: 
                 return
-            self.set_status_message("Loading AI Model...", "#ffd700", 3000)
-            self.root.update()
-            try: 
-                self.ai_model = YOLO(model_path)
-            except Exception as e: 
-                messagebox.showerror("AI Error", f"Gagal meload model: {e}")
-                return
                 
+            self.set_status_message("Mounting PyTorch Model... Please wait.", "#ffd700", 10000)
+            self.root.update()
+            
+            def load_model_task():
+                try: 
+                    # Load heavy model in background
+                    loaded_model = YOLO(model_path)
+                    # Safely pass back to main thread to start inference
+                    self.root.after(0, self._on_model_loaded, loaded_model)
+                except Exception as e: 
+                    self.root.after(0, lambda: messagebox.showerror("AI Error", f"Gagal meload model: {e}"))
+            
+            threading.Thread(target=load_model_task, daemon=True).start()
+            return # Exit function early; _on_model_loaded will trigger inference
+
+        # 2. If model is ALREADY loaded, just jump straight to inference
+        self._execute_inference_thread()
+
+    def _on_model_loaded(self, loaded_model):
+        """Callback when PyTorch finishes loading the model into memory"""
+        self.ai_model = loaded_model
+        self.set_status_message("Model Loaded! Starting inference...", "#00f2ff", 2000)
+        self._execute_inference_thread()
+
+    def _execute_inference_thread(self):
+        """The actual threaded inference logic you already built"""
         filepath = os.path.join(self.source_dir, self.image_list[self.current_index])
         self.set_status_message("AI Running Inference... Please wait.", "#8a2be2", 10000) 
         
-        # We capture the exact index the user is looking at RIGHT NOW
         target_idx = self.current_index 
         
         def inference_task(expected_idx):
             try:
                 results = self.ai_model(filepath)
-                # THREAD SAFETY: Only apply results if the user hasn't skipped to another image!
                 if self.current_index == expected_idx:
                     self.root.after(0, self._process_ai_results, results)
             except Exception as e: 
                 self.root.after(0, lambda: messagebox.showerror("Inference Error", f"Error:\n{e}"))
                 
-        # Start the background thread, passing the expected index
         threading.Thread(target=inference_task, args=(target_idx,), daemon=True).start()
 
     def _process_ai_results(self, results):
@@ -694,7 +711,7 @@ class VisionTag_Enterprise:
             clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
             img_cv[:,:,0] = clahe.apply(img_cv[:,:,0])
             new_img = Image.fromarray(cv2.cvtColor(img_cv, cv2.COLOR_LAB2RGB))
-            new_boxes = copy.deepcopy(target_boxes)
+            new_boxes = [list(box) for box in target_boxes]
             
         elif action == 'invert':
             if target_img.mode == 'RGBA':
@@ -703,18 +720,18 @@ class VisionTag_Enterprise:
                 new_img = Image.merge('RGBA', (r2, g2, b2, a))
             else: 
                 new_img = ImageOps.invert(target_img.convert('RGB'))
-            new_boxes = copy.deepcopy(target_boxes)
+            new_boxes = [list(box) for box in target_boxes]
             
         elif action == 'bright':
             new_img = ImageEnhance.Brightness(target_img).enhance(1.3)
-            new_boxes = copy.deepcopy(target_boxes)
+            new_boxes = [list(box) for box in target_boxes]
             
         elif action == 'noise':
             img_arr = np.array(target_img)
             noise = np.random.randint(-30, 30, img_arr.shape, dtype='int16')
             noisy_img = np.clip(img_arr.astype('int16') + noise, 0, 255).astype('uint8')
             new_img = Image.fromarray(noisy_img)
-            new_boxes = copy.deepcopy(target_boxes)
+            new_boxes = [list(box) for box in target_boxes]
 
         if not new_img: 
             return False
@@ -988,12 +1005,12 @@ class VisionTag_Enterprise:
             self.toast_timer = self.root.after(40, self.fade_out_toast)
 
     def push_state(self):
-        self.undo_stack.append(copy.deepcopy(self.current_boxes))
+        self.undo_stack.append([list(box) for box in self.current_boxes])
         self.redo_stack.clear()
 
     def perform_undo(self):
         if self.undo_stack:
-            self.redo_stack.append(copy.deepcopy(self.current_boxes))
+            self.redo_stack.append([list(box) for box in self.current_boxes])
             self.current_boxes = self.undo_stack.pop()
             self.selected_box_idx = -1
             self.show_image()
@@ -1001,7 +1018,7 @@ class VisionTag_Enterprise:
 
     def perform_redo(self):
         if self.redo_stack:
-            self.undo_stack.append(copy.deepcopy(self.current_boxes))
+            self.undo_stack.append([list(box) for box in self.current_boxes])
             self.current_boxes = self.redo_stack.pop()
             self.selected_box_idx = -1
             self.show_image()
@@ -1360,7 +1377,7 @@ class VisionTag_Enterprise:
         # HEAVY PROCESSING BLOCK - Only runs if specifically flagged
         if getattr(self, 'needs_reprocess', True):
             w, h = self.original_img.size
-            resized = self.original_img.resize((max(1, int(w * self.zoom_level)), max(1, int(h * self.zoom_level))), Image.Resampling.LANCZOS)
+            resized = self.original_img.resize((max(1, int(w * self.zoom_level)), max(1, int(h * self.zoom_level))), Image.Resampling.BILINEAR)
             
             if self.brightness != 1.0: 
                 resized = ImageEnhance.Brightness(resized).enhance(self.brightness)
