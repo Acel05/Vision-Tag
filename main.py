@@ -6,6 +6,7 @@ from collections import defaultdict
 import json
 import copy
 import math
+import threading
 import numpy as np
 from PIL import Image, ImageTk, ImageEnhance, ImageOps
 
@@ -85,6 +86,7 @@ class VisionTag_Enterprise:
         self.show_annotations = True
         self.brightness = 1.0
         self.contrast = 1.0
+        self.enhance_timer = None
         
         # Variables
         self.untagged_only_var = tk.BooleanVar(value=False)
@@ -371,32 +373,41 @@ class VisionTag_Enterprise:
                 return
                 
         filepath = os.path.join(self.source_dir, self.image_list[self.current_index])
-        self.set_status_message("Running Inference...", "#ffd700", 2000)
-        self.root.update()
+        self.set_status_message("AI Running Inference... Please wait.", "#8a2be2", 10000) 
         
-        try:
-            results = self.ai_model(filepath)
-            self.push_state()
-            boxes_added = 0
-            
-            for r in results:
-                if r.obb is not None:
-                    for i in range(len(r.obb)):
-                        cx, cy, w, h, rad = r.obb.xywhr[i].tolist()
-                        cls_name = r.names[int(r.obb.cls[i].item())]
-                        if cls_name not in self.master_classes:
-                            self.master_classes.append(cls_name)
-                            self._save_external_config()
-                            self._update_filter_combo_values()
-                            
-                        self.current_boxes.append([cls_name, cx, cy, w, h, math.degrees(rad)])
-                        boxes_added += 1
+        # Define the background task
+        def inference_task():
+            try:
+                results = self.ai_model(filepath)
+                # Safely send the results back to the main Tkinter thread
+                self.root.after(0, self._process_ai_results, results)
+            except Exception as e: 
+                self.root.after(0, lambda: messagebox.showerror("Inference Error", f"Error:\n{e}"))
+                
+        # Start the background thread
+        threading.Thread(target=inference_task, daemon=True).start()
+
+    def _process_ai_results(self, results):
+        self.push_state()
+        boxes_added = 0
+        
+        for r in results:
+            if r.obb is not None:
+                for i in range(len(r.obb)):
+                    cx, cy, w, h, rad = r.obb.xywhr[i].tolist()
+                    cls_name = r.names[int(r.obb.cls[i].item())]
+                    
+                    if cls_name not in self.master_classes:
+                        self.master_classes.append(cls_name)
+                        self._save_external_config()
+                        self._update_filter_combo_values()
                         
-            self.render_tags()
-            self.show_image()
-            self.set_status_message(f"AI Auto-Detect Selesai: {boxes_added} Objek ditemukan!", "#00ff00", 3000)
-        except Exception as e: 
-            messagebox.showerror("Inference Error", f"Error:\n{e}")
+                    self.current_boxes.append([cls_name, cx, cy, w, h, math.degrees(rad)])
+                    boxes_added += 1
+                    
+        self.render_tags()
+        self.show_image()
+        self.set_status_message(f"AI Auto-Detect Selesai: {boxes_added} Objek ditemukan!", "#00ff00", 3000)
 
     def show_bulk_rename_dialog(self):
         dialog = tk.Toplevel(self.root)
@@ -1023,7 +1034,18 @@ class VisionTag_Enterprise:
         elif target == 'contrast': 
             self.contrast = max(0.2, min(3.0, self.contrast + amount))
             
-        # FLAG: Recalculate pixels because filter changed
+        # Update the HUD text instantly without recalculating the heavy PIL image
+        self.set_status_message(f"Adjusting {target}...", "#ffd700", 500)
+        
+        # Debounce: Cancel the previous timer if the user is still actively pressing the key
+        if self.enhance_timer:
+            self.root.after_cancel(self.enhance_timer)
+            
+        # Schedule the heavy processing to run 150ms AFTER they stop pressing the key
+        self.enhance_timer = self.root.after(150, self._apply_enhancement)
+    
+    def _apply_enhancement(self):
+        # Tell the show_image function it is allowed to recalculate the pixels
         self.needs_reprocess = True
         self.show_image()
 
@@ -1387,6 +1409,27 @@ class VisionTag_Enterprise:
             self.canvas.tag_raise("crosshair")
         self.canvas.tag_raise("hud")
 
+    def reset_view(self, event=None):
+        if not self.original_img: 
+            return
+            
+        cw = self.canvas.winfo_width()
+        ch = self.canvas.winfo_height()
+        
+        if cw <= 1: 
+            return
+            
+        img_w, img_h = self.original_img.size
+        
+        # Reset zoom and center coordinates
+        self.zoom_level = min(cw / img_w, ch / img_h) * 0.95
+        self.img_x = cw // 2
+        self.img_y = ch // 2
+        
+        self.needs_reprocess = True
+        self.show_image()
+        self.set_status_message("View Reset", "#00f2ff", 1500)
+
     def setup_shortcuts(self):
         def is_not_typing(e): 
             return e.widget.winfo_class() != 'Entry'
@@ -1400,6 +1443,7 @@ class VisionTag_Enterprise:
         self.root.bind("<Control-c>", lambda e: self.copy_box() if is_not_typing(e) else None)
         self.root.bind("<Control-v>", lambda e: self.paste_box() if is_not_typing(e) else None)
         self.root.bind("<v>", lambda e: self.toggle_visibility() if is_not_typing(e) else None)
+        self.root.bind("<r>", lambda e: self.reset_view() if is_not_typing(e) else None)
         self.root.bind("-", lambda e: self.adjust_enhancement('brightness', -0.2) if is_not_typing(e) else None)
         self.root.bind("=", lambda e: self.adjust_enhancement('brightness', 0.2) if is_not_typing(e) else None)
         self.root.bind("+", lambda e: self.adjust_enhancement('brightness', 0.2) if is_not_typing(e) else None)
