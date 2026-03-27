@@ -337,11 +337,13 @@ class VisionTag_Enterprise:
             self._remove_files_for_class(cls_name, filename, base_name)
             shutil.copy2(src_filepath, os.path.join(img_dir, target_basename + ext))
             
-            with open(os.path.join(class_dir, 'classes.txt'), 'w') as f: 
-                f.write(f"{cls_name}\n")
-                
-            with open(os.path.join(class_dir, 'notes.json'), 'w') as f: 
-                json.dump({"categories": [{"id": 0, "name": cls_name}], "info": {"year": 2026, "version": "1.0", "contributor": "Label Studio"}}, f, indent=2)
+            # Only write static configs if the directory is brand new
+            notes_path = os.path.join(class_dir, 'notes.json')
+            if not os.path.exists(notes_path):
+                with open(os.path.join(class_dir, 'classes.txt'), 'w') as f: 
+                    f.write(f"{cls_name}\n")
+                with open(notes_path, 'w') as f: 
+                    json.dump({"categories": [{"id": 0, "name": cls_name}], "info": {"year": 2026, "version": "1.0", "contributor": "Label Studio"}}, f, indent=2)
                 
             with open(os.path.join(lbl_dir, f"{target_basename}.txt"), 'w') as f:
                 for box in boxes:
@@ -593,17 +595,13 @@ class VisionTag_Enterprise:
                 
                 for idx, tags in self.history_tags.items():
                     filename = self.image_list[idx]
-                    
                     if self._get_pure_basename(filename) != os.path.splitext(filename)[0]: 
                         continue 
-                    
                     if scope == "specific" and not tags.intersection(sel_classes): 
                         continue
-                    
                     pure_base = self._get_pure_basename(filename)
                     if any(img != filename and self._get_pure_basename(img) == pure_base for img in self.image_list): 
                         continue
-                    
                     targets.append(idx)
             
             if not targets:
@@ -611,26 +609,31 @@ class VisionTag_Enterprise:
                 return
                 
             target_filenames = [self.image_list[idx] for idx in targets]
-            self.set_status_message(f"Processing & Cleaning {len(target_filenames)} images...", "#ffd700", 3000)
-            self.root.update()
             
-            success_count = 0
-            deleted_dups_count = 0
-            
-            for t_filename in target_filenames:
-                if t_filename not in self.image_list: 
-                    continue 
-                pure_base = self._get_pure_basename(t_filename)
-                
-                for act in actions:
-                    deleted_dups_count += self._cleanup_duplicates(pure_base, act)
-                    current_idx = self.image_list.index(t_filename)
-                    if self.execute_augmentation(act, current_idx): 
-                        success_count += 1
-                        
+            # --- OPTIMIZATION: Threading the Heavy Loop ---
+            self.set_status_message(f"Augmenting {len(target_filenames)} images in background...", "#ffd700", 5000)
             dialog.destroy()
-            self.set_status_message(f"Selesai! {success_count} augment baru. {deleted_dups_count} duplikat dihapus.", "#00ff00", 5000)
-            self.show_image()
+            
+            def background_augmentation():
+                success_count = 0
+                deleted_dups_count = 0
+                
+                for t_filename in target_filenames:
+                    if t_filename not in self.image_list: 
+                        continue 
+                    pure_base = self._get_pure_basename(t_filename)
+                    
+                    for act in actions:
+                        deleted_dups_count += self._cleanup_duplicates(pure_base, act)
+                        current_idx = self.image_list.index(t_filename)
+                        if self.execute_augmentation(act, current_idx): 
+                            success_count += 1
+                            
+                # Safely update the UI from the background thread once completely finished
+                self.root.after(0, lambda: self.set_status_message(f"Selesai! {success_count} augment baru. {deleted_dups_count} duplikat dihapus.", "#00ff00", 6000))
+                self.root.after(0, self.show_image)
+                
+            threading.Thread(target=background_augmentation, daemon=True).start()
             
         tk.Button(dialog, text="GENERATE AUGMENTED COPY", bg="#008080", fg="white", font=("Segoe UI", 10, "bold"), relief="flat", command=execute).pack(fill="x", padx=30, pady=25, ipady=5)
 
@@ -756,8 +759,13 @@ class VisionTag_Enterprise:
             
             shutil.copy2(os.path.join(self.source_dir, new_filename), os.path.join(img_dir, new_filename))
             
-            with open(os.path.join(class_dir, 'classes.txt'), 'w') as f: 
-                f.write(f"{cls_name}\n")
+            # Only write static configs if the directory is brand new
+            notes_path = os.path.join(class_dir, 'notes.json')
+            if not os.path.exists(notes_path):
+                with open(os.path.join(class_dir, 'classes.txt'), 'w') as f: 
+                    f.write(f"{cls_name}\n")
+                with open(notes_path, 'w') as f: 
+                    json.dump({"categories": [{"id": 0, "name": cls_name}], "info": {"year": 2026, "version": "1.0", "contributor": "Label Studio"}}, f, indent=2)
                 
             with open(os.path.join(lbl_dir, f"{new_basename}.txt"), 'w') as f:
                 for box in boxes:
