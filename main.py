@@ -375,17 +375,20 @@ class VisionTag_Enterprise:
         filepath = os.path.join(self.source_dir, self.image_list[self.current_index])
         self.set_status_message("AI Running Inference... Please wait.", "#8a2be2", 10000) 
         
-        # Define the background task
-        def inference_task():
+        # We capture the exact index the user is looking at RIGHT NOW
+        target_idx = self.current_index 
+        
+        def inference_task(expected_idx):
             try:
                 results = self.ai_model(filepath)
-                # Safely send the results back to the main Tkinter thread
-                self.root.after(0, self._process_ai_results, results)
+                # THREAD SAFETY: Only apply results if the user hasn't skipped to another image!
+                if self.current_index == expected_idx:
+                    self.root.after(0, self._process_ai_results, results)
             except Exception as e: 
                 self.root.after(0, lambda: messagebox.showerror("Inference Error", f"Error:\n{e}"))
                 
-        # Start the background thread
-        threading.Thread(target=inference_task, daemon=True).start()
+        # Start the background thread, passing the expected index
+        threading.Thread(target=inference_task, args=(target_idx,), daemon=True).start()
 
     def _process_ai_results(self, results):
         self.push_state()
@@ -1162,7 +1165,12 @@ class VisionTag_Enterprise:
         if self.show_annotations:
             self.canvas.coords(self.vline, event.x, 0, event.x, self.canvas.winfo_height())
             self.canvas.coords(self.hline, 0, event.y, self.canvas.winfo_width(), event.y)
-            self.canvas.tag_raise("crosshair")
+
+    def quick_select_class(self, idx):
+        # Sort classes alphabetically to match how they are displayed in the UI list
+        sorted_classes = sorted(self.master_classes)
+        if idx < len(sorted_classes):
+            self.set_active_class(sorted_classes[idx])
 
     def handle_scroll(self, event):
         ctrl_pressed = (event.state & 0x0004) != 0
@@ -1449,6 +1457,11 @@ class VisionTag_Enterprise:
         self.root.bind("+", lambda e: self.adjust_enhancement('brightness', 0.2) if is_not_typing(e) else None)
         self.root.bind("[", lambda e: self.adjust_enhancement('contrast', -0.2) if is_not_typing(e) else None)
         self.root.bind("]", lambda e: self.adjust_enhancement('contrast', 0.2) if is_not_typing(e) else None)
+
+        # Bind keys 1 through 9 for fast class switching
+        for i in range(1, 10):
+            # i-1 converts key '1' to index 0, key '2' to index 1, etc.
+            self.root.bind(str(i), lambda e, idx=i-1: self.quick_select_class(idx) if is_not_typing(e) else None)
 
     def setup_ui(self):
         self.main_container = tk.Frame(self.root, bg="#121212")
