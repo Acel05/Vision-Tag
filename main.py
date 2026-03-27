@@ -777,7 +777,7 @@ class VisionTag_Enterprise:
 
         self.history_tags[len(self.image_list) - 1] = new_classes
         if target_idx == self.current_index: 
-            self.root.update()
+            self.root.after(0, self.root.update_idletasks)
             
         return True
 
@@ -1213,8 +1213,18 @@ class VisionTag_Enterprise:
                     self.show_image()
                     break
         else:
-            self.zoom_level *= (1.1 if delta > 0 else 0.9)
-            # FLAG: Recalculate pixels because zoom changed
+            scale_factor = 1.1 if delta > 0 else 0.9
+            
+            # --- ZOOM TO CURSOR MATH ---
+            # Calculate distance from screen center to mouse cursor
+            dx = event.x - self.img_x
+            dy = event.y - self.img_y
+            
+            # Shift the image center in the opposite direction to keep the pixel under the mouse static
+            self.img_x -= dx * (scale_factor - 1)
+            self.img_y -= dy * (scale_factor - 1)
+            
+            self.zoom_level *= scale_factor
             self.needs_reprocess = True
             self.show_image()
 
